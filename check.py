@@ -59,6 +59,7 @@ def check_task() -> bool:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         try:
+            # ログイン
             page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
             inputs = page.locator("input")
             inputs.nth(0).press_sequentially(USER_ID, delay=100)
@@ -66,9 +67,39 @@ def check_task() -> bool:
             page.locator('input[value="Start"]').first.click()
             page.wait_for_load_state("networkidle")
 
-            page.get_by_role("button", name="Enter").first.click()
+            # デバッグ出力（ログイン後の画面状態を確認）
+            print("Current URL after Start:", page.url)
+            print("Frames:", [f.url for f in page.frames])
+            for idx, f in enumerate(page.frames):
+                try:
+                    btns = f.get_by_role("button").all_inner_texts()
+                    inps = f.locator("input").evaluate_all(
+                        "els => els.map(e => ({type: e.type, value: e.value, name: e.name}))"
+                    )
+                    links = f.locator("a").all_inner_texts()
+                    print(
+                        f"Frame[{idx}] ({f.url}) buttons={btns} inputs={inps} links={links[:10]}"
+                    )
+                except Exception as e:
+                    print(f"Frame[{idx}] inspect error: {e}")
+
+            # 全フレームから Enter を探してクリック
+            clicked_enter = False
+            for f in page.frames:
+                loc = f.locator(
+                    'input[value="Enter"], button:has-text("Enter"), a:has-text("Enter")'
+                )
+                if loc.count() > 0:
+                    loc.first.click(timeout=10000)
+                    clicked_enter = True
+                    break
+
+            if not clicked_enter:
+                raise RuntimeError(f"'Enter' control not found on page: {page.url}")
+
             page.wait_for_load_state("networkidle")
 
+            # フレーム内から BUS(☆) をクリック
             for frame in page.frames:
                 star = frame.locator("a[href*='BUS.html']").filter(has_text="☆")
                 if star.count() > 0:
@@ -76,6 +107,7 @@ def check_task() -> bool:
                     break
             page.wait_for_timeout(3000)
 
+            # 空き判定（targets.json の各科目を順に確認）
             for frame in page.frames:
                 has_any_row = any(
                     frame.locator("tr", has_text=t["reg_no"]).count() > 0
