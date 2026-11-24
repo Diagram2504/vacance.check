@@ -12,6 +12,7 @@ LINE_USER_ID = os.environ["LINE_USER_ID"]
 SEND_MODE = os.environ.get("SEND_MODE", "me")
 
 TARGETS_FILE = Path(__file__).with_name("targets.json")
+STEP_LAG_MS = 1000  # 各ステップのラグ（1秒）
 
 
 def load_targets() -> list[dict[str, str]]:
@@ -46,11 +47,64 @@ def send_line_message(message: str) -> None:
         print(f">>> [LINE] 送信失敗({mode_text}): {response.status_code} {response.text}")
 
 
+def find_and_click_enter(page) -> bool:
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(STEP_LAG_MS)
+
+    selectors = [
+        'input[value="Enter"]',
+        'input[value*="Enter" i]',
+        'button:has-text("Enter")',
+        'a:has-text("Enter")',
+    ]
+    for frame in page.frames:
+        for sel in selectors:
+            loc = frame.locator(sel)
+            if loc.count() > 0:
+                loc.first.click(timeout=10000)
+                return True
+
+        role_btn = frame.get_by_role("button", name=re.compile("enter", re.I))
+        if role_btn.count() > 0:
+            role_btn.first.click(timeout=10000)
+            return True
+
+    return False
+
+
+def click_bus_link(page, bus_keyword: str) -> bool:
+    """指定されたカテゴリ（例: BUS, LAなど）の☆リンクをクリック"""
+    href_pattern = f"{bus_keyword}.html"
+    for frame in page.frames:
+        star = frame.locator(f"a[href*='{href_pattern}']").filter(has_text="☆")
+        if star.count() > 0:
+            star.first.click()
+            return True
+        # hrefの大小文字の違いに備えた予備検索
+        star_any = frame.locator("a").filter(has_text="☆")
+        for i in range(star_any.count()):
+            el = star_any.nth(i)
+            href = el.get_attribute("href") or ""
+            if bus_keyword.lower() in href.lower():
+                el.click()
+                return True
+    return False
+
+
 def check_task() -> None:
     targets = load_targets()
     if not targets:
         print("監視対象の科目が targets.json にありません。")
         return
+
+    # bus設定ごとに科目をグループ化（同じ画面の科目を1度の遷移でチェックするため）
+    grouped_targets: dict[str, list[dict[str, str]]] = {}
+    for t in targets:
+        bus_key = t.get("bus", "BUS").upper()
+        grouped_targets.setdefault(bus_key, []).append(t)
 
     login_url = "https://course-reg.icu.ac.jp/cgi-bin/login"
 
@@ -63,59 +117,57 @@ def check_task() -> None:
             inputs.nth(0).press_sequentially(USER_ID, delay=100)
             inputs.nth(1).press_sequentially(PASSWORD, delay=100)
             page.locator('input[value="Start"]').first.click()
-            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(STEP_LAG_MS)
 
-            clicked_enter = False
-            for f in page.frames:
-                loc = f.locator(
-                    'input[value="Enter"], button:has-text("Enter"), a:has-text("Enter")'
-                )
-                if loc.count() > 0:
-                    loc.first.click(timeout=10000)
-                    clicked_enter = True
-                    break
+            if not find_and_click_enter(page):
+                raise RuntimeError(f"'Enter' が見つかりませんでした。URL: {page.url}")
 
-            if not clicked_enter:
-                raise RuntimeError(f"'Enter' control not found on page: {page.url}")
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except Exception:
+                pass
+            page.wait_for_timeout(STEP_LAG_MS)
 
-            page.wait_for_load_state("networkidle")
-
-            for frame in page.frames:
-                star = frame.locator("a[href*='BUS.html']").filter(has_text="☆")
-                if star.count() > 0:
-                    star.first.click()
-                    break
-            page.wait_for_timeout(3000)
-
-            for frame in page.frames:
-                has_any_row = any(
-                    frame.locator("tr", has_text=t["reg_no"]).count() > 0
-                    for t in targets
-                )
-                if not has_any_row:
+            # グループ（カテゴリ）ごとに画面を開いて判定
+            for bus_key, item_list in grouped_targets.items():
+                if not click_bus_link(page, bus_key):
+                    print(f"[{bus_key}] の☆リンクが見つかりませんでした。")
                     continue
 
-                for target in targets:
-                    reg_no = target["reg_no"]
-                    name = target.get("name", "")
-                    row = frame.locator("tr", has_text=reg_no)
-                    if row.count() == 0:
-                        print(f"[{reg_no} {name}] 該当行が見つかりませんでした。")
+                # 画面読み込みのラグ（1.5秒）
+                page.wait_for_timeout(STEP_LAG_MS + 500)
+
+                for frame in page.frames:
+                    has_any_row = any(
+                        frame.locator("tr", has_text=t["reg_no"]).count() > 0
+                        for t in item_list
+                    )
+                    if not has_any_row:
                         continue
 
-                    text = row.first.locator("td").last.inner_text()
-                    nums = re.findall(r"\d+", text)
-                    left = int(nums[0]) if nums else 0
+                    page.wait_for_timeout(STEP_LAG_MS)
+                    for target in item_list:
+                        reg_no = target["reg_no"]
+                        name = target.get("name", "")
+                        row = frame.locator("tr", has_text=reg_no)
+                        if row.count() == 0:
+                            print(f"[{reg_no} {name}] 該当行が見つかりませんでした。")
+                            continue
 
-                    if left >= 1:
-                        print(f"!!! 空き発見 ({reg_no} {name}): {left}席 !!!")
-                        label = f"{reg_no} {name}".strip()
-                        send_line_message(
-                            f"【ICU空き通知】\n空きが出ました！\n科目: {label}\n現在の残席: {left}"
-                        )
-                    else:
-                        print(f"[{reg_no} {name}] 判定：満席 ({left})")
-                break
+                        text = row.first.locator("td").last.inner_text()
+                        nums = re.findall(r"\d+", text)
+                        left = int(nums[0]) if nums else 0
+
+                        if left >= 1:
+                            print(f"!!! 空き発見 ({reg_no} {name}): {left}席 !!!")
+                            label = f"{reg_no} {name}".strip()
+                            send_line_message(
+                                f"【ICU空き通知】\n空きが出ました！\n科目: {label}\n現在の残席: {left}"
+                            )
+                        else:
+                            print(f"[{reg_no} {name}] 判定：満席 ({left})")
+                    break
+
         finally:
             browser.close()
 
