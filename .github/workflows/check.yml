@@ -3,7 +3,7 @@ name: ICU Course Availability Check
 on:
   schedule:
     - cron: "*/5 * * * *"
-      timezone: "Japan/Tokyo"
+      timezone: "Asia/Tokyo"
   workflow_dispatch:
 
 jobs:
