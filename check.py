@@ -46,20 +46,18 @@ def send_line_message(message: str) -> None:
         print(f">>> [LINE] 送信失敗({mode_text}): {response.status_code} {response.text}")
 
 
-def check_task() -> bool:
+def check_task() -> None:
     targets = load_targets()
     if not targets:
         print("監視対象の科目が targets.json にありません。")
-        return False
+        return
 
     login_url = "https://course-reg.icu.ac.jp/cgi-bin/login"
-    found_any = False
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         try:
-            # ログイン
             page.goto(login_url, wait_until="domcontentloaded", timeout=30000)
             inputs = page.locator("input")
             inputs.nth(0).press_sequentially(USER_ID, delay=100)
@@ -67,23 +65,6 @@ def check_task() -> bool:
             page.locator('input[value="Start"]').first.click()
             page.wait_for_load_state("networkidle")
 
-            # デバッグ出力（ログイン後の画面状態を確認）
-            print("Current URL after Start:", page.url)
-            print("Frames:", [f.url for f in page.frames])
-            for idx, f in enumerate(page.frames):
-                try:
-                    btns = f.get_by_role("button").all_inner_texts()
-                    inps = f.locator("input").evaluate_all(
-                        "els => els.map(e => ({type: e.type, value: e.value, name: e.name}))"
-                    )
-                    links = f.locator("a").all_inner_texts()
-                    print(
-                        f"Frame[{idx}] ({f.url}) buttons={btns} inputs={inps} links={links[:10]}"
-                    )
-                except Exception as e:
-                    print(f"Frame[{idx}] inspect error: {e}")
-
-            # 全フレームから Enter を探してクリック
             clicked_enter = False
             for f in page.frames:
                 loc = f.locator(
@@ -99,7 +80,6 @@ def check_task() -> bool:
 
             page.wait_for_load_state("networkidle")
 
-            # フレーム内から BUS(☆) をクリック
             for frame in page.frames:
                 star = frame.locator("a[href*='BUS.html']").filter(has_text="☆")
                 if star.count() > 0:
@@ -107,7 +87,6 @@ def check_task() -> bool:
                     break
             page.wait_for_timeout(3000)
 
-            # 空き判定（targets.json の各科目を順に確認）
             for frame in page.frames:
                 has_any_row = any(
                     frame.locator("tr", has_text=t["reg_no"]).count() > 0
@@ -134,14 +113,11 @@ def check_task() -> bool:
                         send_line_message(
                             f"【ICU空き通知】\n空きが出ました！\n科目: {label}\n現在の残席: {left}"
                         )
-                        found_any = True
                     else:
                         print(f"[{reg_no} {name}] 判定：満席 ({left})")
                 break
         finally:
             browser.close()
-
-    return found_any
 
 
 if __name__ == "__main__":
